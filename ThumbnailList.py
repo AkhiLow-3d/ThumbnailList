@@ -4,7 +4,7 @@ import sys
 import unicodedata
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, Signal, QRect
+from PySide6.QtCore import Qt, QSize, Signal, QRect, QTimer
 from PySide6.QtGui import QPixmap, QAction, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -46,6 +46,8 @@ def natural_key(path: Path):
 class AspectImageLabel(QLabel):
     wheel_up = Signal()
     wheel_down = Signal()
+    ctrl_wheel_up = Signal()
+    ctrl_wheel_down = Signal()
     context_menu_requested = Signal(object)
 
     def __init__(self, empty_text="", target_ratio=None, parent=None):
@@ -55,6 +57,7 @@ class AspectImageLabel(QLabel):
 
         self._base_pixmap = None
         self._overlay_pixmap = None
+        self._zoom_factor = 1.0
 
         self.setAlignment(Qt.AlignCenter)
         self.setText(self.empty_text)
@@ -105,12 +108,26 @@ class AspectImageLabel(QLabel):
         self.target_ratio = ratio
         self._update_scaled_pixmap()
 
+    def set_zoom_factor(self, zoom_factor: float):
+        self._zoom_factor = max(0.1, zoom_factor)
+        self._update_scaled_pixmap()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_scaled_pixmap()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
+        modifiers = QApplication.keyboardModifiers()
+
+        if modifiers & Qt.ControlModifier:
+            if delta > 0:
+                self.ctrl_wheel_up.emit()
+            elif delta < 0:
+                self.ctrl_wheel_down.emit()
+            event.accept()
+            return
+
         if delta > 0:
             self.wheel_up.emit()
         elif delta < 0:
@@ -136,6 +153,9 @@ class AspectImageLabel(QLabel):
         else:
             box_w, box_h = area_w, area_h
 
+        box_w = max(1, int(box_w * self._zoom_factor))
+        box_h = max(1, int(box_h * self._zoom_factor))
+
         img_ratio = src_w / src_h
         box_ratio = box_w / box_h
 
@@ -146,13 +166,10 @@ class AspectImageLabel(QLabel):
             draw_h = box_h
             draw_w = int(draw_h * img_ratio)
 
-        offset_x = (box_w - draw_w) // 2
-        offset_y = (box_h - draw_h) // 2
+        offset_x = (area_w - draw_w) // 2
+        offset_y = (area_h - draw_h) // 2
 
-        canvas_x = (area_w - box_w) // 2
-        canvas_y = (area_h - box_h) // 2
-
-        return QRect(canvas_x + offset_x, canvas_y + offset_y, draw_w, draw_h)
+        return QRect(offset_x, offset_y, draw_w, draw_h)
 
     def _update_scaled_pixmap(self):
         if self._base_pixmap is None:
@@ -250,6 +267,10 @@ class MainWindow(QMainWindow):
     VIEW_MODE_IMAGE_ONLY_BOTH = "image_only_both"
 
     SETTINGS_FILE_NAME = "settings.json"
+    AUTO_PLAY_INTERVAL_MS = 2000
+    ZOOM_STEP = 1.25
+    ZOOM_MIN = 0.25
+    ZOOM_MAX = 8.0
 
     def __init__(self):
         super().__init__()
@@ -263,6 +284,11 @@ class MainWindow(QMainWindow):
         self.left_manual_path: Path | None = None
         self.right_overlay_path: Path | None = None
         self.current_view_mode = self.VIEW_MODE_DEFAULT
+
+        self.right_zoom_factor = 1.0
+
+        self.auto_timer = QTimer(self)
+        self.auto_timer.timeout.connect(self.next_page)
 
         self.settings_path = Path(__file__).resolve().parent / self.SETTINGS_FILE_NAME
         self.settings_data = self.load_settings()
@@ -297,7 +323,6 @@ class MainWindow(QMainWindow):
                 "last_overlay_dir": str(loaded.get("last_overlay_dir", "")),
             })
             return settings
-
         except Exception:
             return defaults
 
@@ -320,7 +345,6 @@ class MainWindow(QMainWindow):
         p = Path(raw)
         if p.exists() and p.is_dir():
             return str(p)
-
         return ""
 
     def _build_ui(self):
@@ -392,12 +416,19 @@ class MainWindow(QMainWindow):
         self.left_mode_label = QLabel("左画像: 自動")
         self.right_overlay_label = QLabel("右オーバーレイ: なし")
         self.view_mode_label = QLabel("表示モード: 通常")
+        self.zoom_label = QLabel("ズーム: 100%")
+        self.auto_play_label = QLabel("自動再生: 停止")
 
-        self.folder_label.setStyleSheet("color: #dddddd; padding: 4px;")
-        self.page_label.setStyleSheet("color: #dddddd; padding: 4px;")
-        self.left_mode_label.setStyleSheet("color: #dddddd; padding: 4px;")
-        self.right_overlay_label.setStyleSheet("color: #dddddd; padding: 4px;")
-        self.view_mode_label.setStyleSheet("color: #dddddd; padding: 4px;")
+        for label in (
+            self.folder_label,
+            self.page_label,
+            self.left_mode_label,
+            self.right_overlay_label,
+            self.view_mode_label,
+            self.zoom_label,
+            self.auto_play_label,
+        ):
+            label.setStyleSheet("color: #dddddd; padding: 4px;")
 
         self.info_widget = QWidget()
         info_layout = QHBoxLayout(self.info_widget)
@@ -406,6 +437,8 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.left_mode_label, 0)
         info_layout.addWidget(self.right_overlay_label, 0)
         info_layout.addWidget(self.view_mode_label, 0)
+        info_layout.addWidget(self.zoom_label, 0)
+        info_layout.addWidget(self.auto_play_label, 0)
         info_layout.addWidget(self.page_label, 0)
 
         self.left_view = AspectImageLabel("左の補助表示", target_ratio=9 / 16)
@@ -414,8 +447,11 @@ class MainWindow(QMainWindow):
         self.left_view.context_menu_requested.connect(
             self.show_left_view_context_menu
         )
+
         self.right_view.wheel_up.connect(self.prev_page)
         self.right_view.wheel_down.connect(self.next_page)
+        self.right_view.ctrl_wheel_up.connect(self.zoom_in)
+        self.right_view.ctrl_wheel_down.connect(self.zoom_out)
         self.right_view.context_menu_requested.connect(
             self.show_right_view_context_menu
         )
@@ -486,8 +522,51 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title_label)
         layout.addWidget(content, 1)
-
         return frame
+
+    def update_zoom_label(self):
+        self.zoom_label.setText(f"ズーム: {int(self.right_zoom_factor * 100)}%")
+
+    def update_auto_play_label(self):
+        state = "再生中" if self.auto_timer.isActive() else "停止"
+        self.auto_play_label.setText(f"自動再生: {state}")
+
+    def apply_right_zoom(self):
+        self.right_view.set_zoom_factor(self.right_zoom_factor)
+        self.update_zoom_label()
+
+    def zoom_in(self):
+        self.right_zoom_factor = min(self.ZOOM_MAX, self.right_zoom_factor * self.ZOOM_STEP)
+        self.apply_right_zoom()
+
+    def zoom_out(self):
+        self.right_zoom_factor = max(self.ZOOM_MIN, self.right_zoom_factor / self.ZOOM_STEP)
+        self.apply_right_zoom()
+
+    def reset_zoom(self):
+        self.right_zoom_factor = 1.0
+        self.apply_right_zoom()
+
+    def start_auto_play(self):
+        self.auto_timer.start(self.AUTO_PLAY_INTERVAL_MS)
+        self.update_auto_play_label()
+
+    def stop_auto_play(self):
+        self.auto_timer.stop()
+        self.update_auto_play_label()
+
+    def toggle_auto_play(self):
+        if self.auto_timer.isActive():
+            self.stop_auto_play()
+        else:
+            self.start_auto_play()
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+        self.right_view.setFocus()
 
     def apply_view_mode(self, mode: str):
         self.current_view_mode = mode
@@ -550,7 +629,6 @@ class MainWindow(QMainWindow):
 
         menu.addAction(act_choose_left)
         menu.addAction(act_reset_left)
-
         menu.exec(global_pos)
 
     def show_right_view_context_menu(self, global_pos):
@@ -566,6 +644,15 @@ class MainWindow(QMainWindow):
         act_right_expanded = QAction("右拡大モード", self)
         act_image_only = QAction("画像だけモード", self)
         act_image_only_both = QAction("両画像だけモード", self)
+
+        act_zoom_in = QAction("ズームイン", self)
+        act_zoom_out = QAction("ズームアウト", self)
+        act_zoom_reset = QAction("ズームリセット", self)
+
+        act_auto_start = QAction("自動再生開始", self)
+        act_auto_stop = QAction("自動再生停止", self)
+
+        act_fullscreen = QAction("フルスクリーン切替", self)
 
         act_prev = QAction("前へ", self)
         act_next = QAction("次へ", self)
@@ -593,14 +680,25 @@ class MainWindow(QMainWindow):
             lambda: self.apply_view_mode(self.VIEW_MODE_IMAGE_ONLY_BOTH)
         )
 
+        act_zoom_in.triggered.connect(self.zoom_in)
+        act_zoom_out.triggered.connect(self.zoom_out)
+        act_zoom_reset.triggered.connect(self.reset_zoom)
+
+        act_auto_start.triggered.connect(self.start_auto_play)
+        act_auto_stop.triggered.connect(self.stop_auto_play)
+
+        act_fullscreen.triggered.connect(self.toggle_fullscreen)
+
         act_prev.triggered.connect(self.prev_page)
         act_next.triggered.connect(self.next_page)
 
         menu.addAction(act_open_folder)
         menu.addSeparator()
+
         menu.addAction(act_choose_overlay)
         menu.addAction(act_reset_overlay)
         menu.addSeparator()
+
         menu.addAction(act_default)
         menu.addAction(act_vertical)
         menu.addAction(act_focus)
@@ -609,6 +707,19 @@ class MainWindow(QMainWindow):
         menu.addAction(act_image_only)
         menu.addAction(act_image_only_both)
         menu.addSeparator()
+
+        menu.addAction(act_zoom_in)
+        menu.addAction(act_zoom_out)
+        menu.addAction(act_zoom_reset)
+        menu.addSeparator()
+
+        menu.addAction(act_auto_start)
+        menu.addAction(act_auto_stop)
+        menu.addSeparator()
+
+        menu.addAction(act_fullscreen)
+        menu.addSeparator()
+
         menu.addAction(act_prev)
         menu.addAction(act_next)
 
@@ -686,6 +797,8 @@ class MainWindow(QMainWindow):
             self.page_label.setText("0 / 0")
             self.left_mode_label.setText("左画像: なし")
             self.right_overlay_label.setText("右オーバーレイ: なし")
+            self.update_zoom_label()
+            self.update_auto_play_label()
             return
 
         if self.left_manual_path is not None and self.left_manual_path.exists():
@@ -707,8 +820,11 @@ class MainWindow(QMainWindow):
             self.right_view.set_overlay(None)
             self.right_overlay_label.setText("右オーバーレイ: なし")
 
+        self.apply_right_zoom()
+
         self.page_label.setText(f"{self.current_index + 1} / {len(self.image_paths)}")
         self.thumbnail_list.setCurrentRow(self.current_index)
+        self.update_auto_play_label()
 
     def on_thumbnail_clicked(self, item: QListWidgetItem):
         index = self.thumbnail_list.row(item)
@@ -795,12 +911,28 @@ class MainWindow(QMainWindow):
             self.next_page()
             return
 
-        if event.key() == Qt.Key_Escape and self.current_view_mode in (
-            self.VIEW_MODE_IMAGE_ONLY,
-            self.VIEW_MODE_IMAGE_ONLY_BOTH,
-        ):
-            self.apply_view_mode(self.VIEW_MODE_DEFAULT)
+        if event.key() == Qt.Key_F11:
+            self.toggle_fullscreen()
             return
+
+        if event.key() == Qt.Key_0 and QApplication.keyboardModifiers() & Qt.ControlModifier:
+            self.reset_zoom()
+            return
+
+        if event.key() == Qt.Key_Escape:
+            self.stop_auto_play()
+
+            if self.isFullScreen():
+                self.showNormal()
+                self.right_view.setFocus()
+                return
+
+            if self.current_view_mode in (
+                self.VIEW_MODE_IMAGE_ONLY,
+                self.VIEW_MODE_IMAGE_ONLY_BOTH,
+            ):
+                self.apply_view_mode(self.VIEW_MODE_DEFAULT)
+                return
 
         super().keyPressEvent(event)
 
