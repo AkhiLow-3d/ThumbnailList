@@ -56,7 +56,10 @@ class AspectImageLabel(QLabel):
         self.target_ratio = target_ratio
 
         self._base_pixmap = None
-        self._overlay_pixmap = None
+        self._underlay_pixmap = None
+        self._overlay_bottom_pixmap = None
+        self._overlay_middle_pixmap = None
+        self._overlay_top_pixmap = None
         self._zoom_factor = 1.0
 
         self.setAlignment(Qt.AlignCenter)
@@ -89,20 +92,40 @@ class AspectImageLabel(QLabel):
         self._base_pixmap = pixmap
         self._update_scaled_pixmap()
 
-    def set_overlay(self, overlay_path: str | None):
-        if not overlay_path:
-            self._overlay_pixmap = None
+    def set_underlay(self, underlay_path: str | None):
+        if not underlay_path:
+            self._underlay_pixmap = None
             self._update_scaled_pixmap()
             return
 
-        pixmap = QPixmap(overlay_path)
+        pixmap = QPixmap(underlay_path)
         if pixmap.isNull():
-            self._overlay_pixmap = None
+            self._underlay_pixmap = None
             self._update_scaled_pixmap()
             return
 
-        self._overlay_pixmap = pixmap
+        self._underlay_pixmap = pixmap
         self._update_scaled_pixmap()
+
+    def set_overlay_bottom(self, overlay_path: str | None):
+        self._overlay_bottom_pixmap = self._load_optional_pixmap(overlay_path)
+        self._update_scaled_pixmap()
+
+    def set_overlay_middle(self, overlay_path: str | None):
+        self._overlay_middle_pixmap = self._load_optional_pixmap(overlay_path)
+        self._update_scaled_pixmap()
+
+    def set_overlay_top(self, overlay_path: str | None):
+        self._overlay_top_pixmap = self._load_optional_pixmap(overlay_path)
+        self._update_scaled_pixmap()
+
+    def _load_optional_pixmap(self, image_path: str | None):
+        if not image_path:
+            return None
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            return None
+        return pixmap
 
     def set_target_ratio(self, ratio: float | None):
         self.target_ratio = ratio
@@ -171,6 +194,16 @@ class AspectImageLabel(QLabel):
 
         return QRect(offset_x, offset_y, draw_w, draw_h)
 
+    def _draw_scaled_pixmap(self, painter: QPainter, pixmap: QPixmap | None, rect: QRect):
+        if pixmap is None:
+            return
+        scaled = pixmap.scaled(
+            rect.size(),
+            Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation
+        )
+        painter.drawPixmap(rect.topLeft(), scaled)
+
     def _update_scaled_pixmap(self):
         if self._base_pixmap is None:
             self.setPixmap(QPixmap())
@@ -191,15 +224,17 @@ class AspectImageLabel(QLabel):
             self._base_pixmap.width(),
             self._base_pixmap.height()
         )
+
+        # 1. 背景
+        self._draw_scaled_pixmap(painter, self._underlay_pixmap, base_rect)
+
+        # 2. メイン
         painter.drawPixmap(base_rect, self._base_pixmap)
 
-        if self._overlay_pixmap is not None:
-            overlay_scaled = self._overlay_pixmap.scaled(
-                base_rect.size(),
-                Qt.IgnoreAspectRatio,
-                Qt.SmoothTransformation
-            )
-            painter.drawPixmap(base_rect.topLeft(), overlay_scaled)
+        # 3. 固定3スロット
+        self._draw_scaled_pixmap(painter, self._overlay_bottom_pixmap, base_rect)
+        self._draw_scaled_pixmap(painter, self._overlay_middle_pixmap, base_rect)
+        self._draw_scaled_pixmap(painter, self._overlay_top_pixmap, base_rect)
 
         painter.end()
 
@@ -282,9 +317,13 @@ class MainWindow(QMainWindow):
         self.current_index = 0
         self.left_index = 0
         self.left_manual_path: Path | None = None
-        self.right_overlay_path: Path | None = None
-        self.current_view_mode = self.VIEW_MODE_DEFAULT
 
+        self.right_underlay_path: Path | None = None
+        self.right_overlay_bottom_path: Path | None = None
+        self.right_overlay_middle_path: Path | None = None
+        self.right_overlay_top_path: Path | None = None
+
+        self.current_view_mode = self.VIEW_MODE_DEFAULT
         self.right_zoom_factor = 1.0
 
         self.auto_timer = QTimer(self)
@@ -300,6 +339,7 @@ class MainWindow(QMainWindow):
         return {
             "last_main_dir": "",
             "last_left_image_dir": "",
+            "last_underlay_dir": "",
             "last_overlay_dir": "",
         }
 
@@ -320,6 +360,7 @@ class MainWindow(QMainWindow):
             settings.update({
                 "last_main_dir": str(loaded.get("last_main_dir", "")),
                 "last_left_image_dir": str(loaded.get("last_left_image_dir", "")),
+                "last_underlay_dir": str(loaded.get("last_underlay_dir", "")),
                 "last_overlay_dir": str(loaded.get("last_overlay_dir", "")),
             })
             return settings
@@ -356,8 +397,16 @@ class MainWindow(QMainWindow):
         self.btn_next = QPushButton("次へ")
         self.btn_set_left = QPushButton("左画像を選ぶ")
         self.btn_reset_left = QPushButton("左画像を自動に戻す")
-        self.btn_set_right_overlay = QPushButton("右オーバーレイを選ぶ")
-        self.btn_reset_right_overlay = QPushButton("右オーバーレイ解除")
+
+        self.btn_set_right_underlay = QPushButton("右背景を選ぶ")
+        self.btn_reset_right_underlay = QPushButton("右背景解除")
+
+        self.btn_set_right_overlay_bottom = QPushButton("右オーバーレイ下")
+        self.btn_reset_right_overlay_bottom = QPushButton("下解除")
+        self.btn_set_right_overlay_middle = QPushButton("右オーバーレイ中")
+        self.btn_reset_right_overlay_middle = QPushButton("中解除")
+        self.btn_set_right_overlay_top = QPushButton("右オーバーレイ上")
+        self.btn_reset_right_overlay_top = QPushButton("上解除")
 
         self.btn_mode_default = QPushButton("通常モード")
         self.btn_mode_vertical = QPushButton("縦スライドモード")
@@ -371,8 +420,16 @@ class MainWindow(QMainWindow):
         self.btn_next.clicked.connect(self.next_page)
         self.btn_set_left.clicked.connect(self.choose_left_image)
         self.btn_reset_left.clicked.connect(self.reset_left_image)
-        self.btn_set_right_overlay.clicked.connect(self.choose_right_overlay)
-        self.btn_reset_right_overlay.clicked.connect(self.reset_right_overlay)
+
+        self.btn_set_right_underlay.clicked.connect(self.choose_right_underlay)
+        self.btn_reset_right_underlay.clicked.connect(self.reset_right_underlay)
+
+        self.btn_set_right_overlay_bottom.clicked.connect(self.choose_right_overlay_bottom)
+        self.btn_reset_right_overlay_bottom.clicked.connect(self.reset_right_overlay_bottom)
+        self.btn_set_right_overlay_middle.clicked.connect(self.choose_right_overlay_middle)
+        self.btn_reset_right_overlay_middle.clicked.connect(self.reset_right_overlay_middle)
+        self.btn_set_right_overlay_top.clicked.connect(self.choose_right_overlay_top)
+        self.btn_reset_right_overlay_top.clicked.connect(self.reset_right_overlay_top)
 
         self.btn_mode_default.clicked.connect(
             lambda: self.apply_view_mode(self.VIEW_MODE_DEFAULT)
@@ -401,9 +458,19 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self.btn_set_left)
         self.toolbar.addWidget(self.btn_reset_left)
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(self.btn_set_right_overlay)
-        self.toolbar.addWidget(self.btn_reset_right_overlay)
+
+        self.toolbar.addWidget(self.btn_set_right_underlay)
+        self.toolbar.addWidget(self.btn_reset_right_underlay)
         self.toolbar.addSeparator()
+
+        self.toolbar.addWidget(self.btn_set_right_overlay_bottom)
+        self.toolbar.addWidget(self.btn_reset_right_overlay_bottom)
+        self.toolbar.addWidget(self.btn_set_right_overlay_middle)
+        self.toolbar.addWidget(self.btn_reset_right_overlay_middle)
+        self.toolbar.addWidget(self.btn_set_right_overlay_top)
+        self.toolbar.addWidget(self.btn_reset_right_overlay_top)
+        self.toolbar.addSeparator()
+
         self.toolbar.addWidget(self.btn_mode_default)
         self.toolbar.addWidget(self.btn_mode_vertical)
         self.toolbar.addWidget(self.btn_mode_focus)
@@ -414,7 +481,10 @@ class MainWindow(QMainWindow):
         self.folder_label = QLabel("フォルダ未選択")
         self.page_label = QLabel("0 / 0")
         self.left_mode_label = QLabel("左画像: 自動")
-        self.right_overlay_label = QLabel("右オーバーレイ: なし")
+        self.right_underlay_label = QLabel("右背景: なし")
+        self.right_overlay_bottom_label = QLabel("下: なし")
+        self.right_overlay_middle_label = QLabel("中: なし")
+        self.right_overlay_top_label = QLabel("上: なし")
         self.view_mode_label = QLabel("表示モード: 通常")
         self.zoom_label = QLabel("ズーム: 100%")
         self.auto_play_label = QLabel("自動再生: 停止")
@@ -423,7 +493,10 @@ class MainWindow(QMainWindow):
             self.folder_label,
             self.page_label,
             self.left_mode_label,
-            self.right_overlay_label,
+            self.right_underlay_label,
+            self.right_overlay_bottom_label,
+            self.right_overlay_middle_label,
+            self.right_overlay_top_label,
             self.view_mode_label,
             self.zoom_label,
             self.auto_play_label,
@@ -435,7 +508,10 @@ class MainWindow(QMainWindow):
         info_layout.setContentsMargins(8, 4, 8, 4)
         info_layout.addWidget(self.folder_label, 1)
         info_layout.addWidget(self.left_mode_label, 0)
-        info_layout.addWidget(self.right_overlay_label, 0)
+        info_layout.addWidget(self.right_underlay_label, 0)
+        info_layout.addWidget(self.right_overlay_bottom_label, 0)
+        info_layout.addWidget(self.right_overlay_middle_label, 0)
+        info_layout.addWidget(self.right_overlay_top_label, 0)
         info_layout.addWidget(self.view_mode_label, 0)
         info_layout.addWidget(self.zoom_label, 0)
         info_layout.addWidget(self.auto_play_label, 0)
@@ -490,7 +566,7 @@ class MainWindow(QMainWindow):
             QPushButton {
                 background: #3a3a3a;
                 border: 1px solid #555555;
-                padding: 6px 12px;
+                padding: 6px 10px;
             }
             QPushButton:hover {
                 background: #4a4a4a;
@@ -531,6 +607,25 @@ class MainWindow(QMainWindow):
         state = "再生中" if self.auto_timer.isActive() else "停止"
         self.auto_play_label.setText(f"自動再生: {state}")
 
+    def _label_text_from_path(self, prefix: str, path: Path | None):
+        if path is not None and path.exists():
+            return f"{prefix}: {path.name}"
+        return f"{prefix}: なし"
+
+    def update_right_layer_labels(self):
+        self.right_underlay_label.setText(
+            self._label_text_from_path("右背景", self.right_underlay_path)
+        )
+        self.right_overlay_bottom_label.setText(
+            self._label_text_from_path("下", self.right_overlay_bottom_path)
+        )
+        self.right_overlay_middle_label.setText(
+            self._label_text_from_path("中", self.right_overlay_middle_path)
+        )
+        self.right_overlay_top_label.setText(
+            self._label_text_from_path("上", self.right_overlay_top_path)
+        )
+
     def apply_right_zoom(self):
         self.right_view.set_zoom_factor(self.right_zoom_factor)
         self.update_zoom_label()
@@ -554,12 +649,6 @@ class MainWindow(QMainWindow):
     def stop_auto_play(self):
         self.auto_timer.stop()
         self.update_auto_play_label()
-
-    def toggle_auto_play(self):
-        if self.auto_timer.isActive():
-            self.stop_auto_play()
-        else:
-            self.start_auto_play()
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
@@ -635,8 +724,16 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
 
         act_open_folder = QAction("フォルダを開く", self)
-        act_choose_overlay = QAction("右オーバーレイを選ぶ", self)
-        act_reset_overlay = QAction("右オーバーレイ解除", self)
+
+        act_choose_underlay = QAction("右背景を選ぶ", self)
+        act_reset_underlay = QAction("右背景解除", self)
+
+        act_choose_bottom = QAction("右オーバーレイ下を選ぶ", self)
+        act_reset_bottom = QAction("右オーバーレイ下を解除", self)
+        act_choose_middle = QAction("右オーバーレイ中を選ぶ", self)
+        act_reset_middle = QAction("右オーバーレイ中を解除", self)
+        act_choose_top = QAction("右オーバーレイ上を選ぶ", self)
+        act_reset_top = QAction("右オーバーレイ上を解除", self)
 
         act_default = QAction("通常モード", self)
         act_vertical = QAction("縦スライドモード", self)
@@ -658,8 +755,16 @@ class MainWindow(QMainWindow):
         act_next = QAction("次へ", self)
 
         act_open_folder.triggered.connect(self.open_folder)
-        act_choose_overlay.triggered.connect(self.choose_right_overlay)
-        act_reset_overlay.triggered.connect(self.reset_right_overlay)
+
+        act_choose_underlay.triggered.connect(self.choose_right_underlay)
+        act_reset_underlay.triggered.connect(self.reset_right_underlay)
+
+        act_choose_bottom.triggered.connect(self.choose_right_overlay_bottom)
+        act_reset_bottom.triggered.connect(self.reset_right_overlay_bottom)
+        act_choose_middle.triggered.connect(self.choose_right_overlay_middle)
+        act_reset_middle.triggered.connect(self.reset_right_overlay_middle)
+        act_choose_top.triggered.connect(self.choose_right_overlay_top)
+        act_reset_top.triggered.connect(self.reset_right_overlay_top)
 
         act_default.triggered.connect(
             lambda: self.apply_view_mode(self.VIEW_MODE_DEFAULT)
@@ -695,8 +800,16 @@ class MainWindow(QMainWindow):
         menu.addAction(act_open_folder)
         menu.addSeparator()
 
-        menu.addAction(act_choose_overlay)
-        menu.addAction(act_reset_overlay)
+        menu.addAction(act_choose_underlay)
+        menu.addAction(act_reset_underlay)
+        menu.addSeparator()
+
+        menu.addAction(act_choose_bottom)
+        menu.addAction(act_reset_bottom)
+        menu.addAction(act_choose_middle)
+        menu.addAction(act_reset_middle)
+        menu.addAction(act_choose_top)
+        menu.addAction(act_reset_top)
         menu.addSeparator()
 
         menu.addAction(act_default)
@@ -796,7 +909,7 @@ class MainWindow(QMainWindow):
             self.right_view.set_image(None)
             self.page_label.setText("0 / 0")
             self.left_mode_label.setText("左画像: なし")
-            self.right_overlay_label.setText("右オーバーレイ: なし")
+            self.update_right_layer_labels()
             self.update_zoom_label()
             self.update_auto_play_label()
             return
@@ -813,17 +926,24 @@ class MainWindow(QMainWindow):
         self.left_view.set_image(left_path)
         self.right_view.set_image(right_path)
 
-        if self.right_overlay_path is not None and self.right_overlay_path.exists():
-            self.right_view.set_overlay(str(self.right_overlay_path))
-            self.right_overlay_label.setText(f"右オーバーレイ: {self.right_overlay_path.name}")
-        else:
-            self.right_view.set_overlay(None)
-            self.right_overlay_label.setText("右オーバーレイ: なし")
+        self.right_view.set_underlay(
+            str(self.right_underlay_path) if self.right_underlay_path and self.right_underlay_path.exists() else None
+        )
+        self.right_view.set_overlay_bottom(
+            str(self.right_overlay_bottom_path) if self.right_overlay_bottom_path and self.right_overlay_bottom_path.exists() else None
+        )
+        self.right_view.set_overlay_middle(
+            str(self.right_overlay_middle_path) if self.right_overlay_middle_path and self.right_overlay_middle_path.exists() else None
+        )
+        self.right_view.set_overlay_top(
+            str(self.right_overlay_top_path) if self.right_overlay_top_path and self.right_overlay_top_path.exists() else None
+        )
 
         self.apply_right_zoom()
 
         self.page_label.setText(f"{self.current_index + 1} / {len(self.image_paths)}")
         self.thumbnail_list.setCurrentRow(self.current_index)
+        self.update_right_layer_labels()
         self.update_auto_play_label()
 
     def on_thumbnail_clicked(self, item: QListWidgetItem):
@@ -880,26 +1000,76 @@ class MainWindow(QMainWindow):
         self.left_index = 0
         self.refresh_views()
 
-    def choose_right_overlay(self):
-        initial_dir = self.get_existing_dir_or_fallback("last_overlay_dir")
+    def choose_right_underlay(self):
+        initial_dir = self.get_existing_dir_or_fallback("last_underlay_dir")
 
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "右に重ねるオーバーレイ画像を選択",
+            "右背景画像を選択",
             initial_dir,
-            "Images (*.png *.webp *.jpg *.jpeg *.bmp *.gif)"
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
         )
         if not file_path:
             return
 
         chosen_path = Path(file_path)
-        self.right_overlay_path = chosen_path
-        self.settings_data["last_overlay_dir"] = str(chosen_path.parent)
+        self.right_underlay_path = chosen_path
+        self.settings_data["last_underlay_dir"] = str(chosen_path.parent)
         self.save_settings()
         self.refresh_views()
 
-    def reset_right_overlay(self):
-        self.right_overlay_path = None
+    def reset_right_underlay(self):
+        self.right_underlay_path = None
+        self.refresh_views()
+
+    def _choose_overlay_common(self, dialog_title: str):
+        initial_dir = self.get_existing_dir_or_fallback("last_overlay_dir")
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            dialog_title,
+            initial_dir,
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
+        )
+        if not file_path:
+            return None
+
+        chosen_path = Path(file_path)
+        self.settings_data["last_overlay_dir"] = str(chosen_path.parent)
+        self.save_settings()
+        return chosen_path
+
+    def choose_right_overlay_bottom(self):
+        chosen_path = self._choose_overlay_common("右オーバーレイ下を選択")
+        if chosen_path is None:
+            return
+        self.right_overlay_bottom_path = chosen_path
+        self.refresh_views()
+
+    def reset_right_overlay_bottom(self):
+        self.right_overlay_bottom_path = None
+        self.refresh_views()
+
+    def choose_right_overlay_middle(self):
+        chosen_path = self._choose_overlay_common("右オーバーレイ中を選択")
+        if chosen_path is None:
+            return
+        self.right_overlay_middle_path = chosen_path
+        self.refresh_views()
+
+    def reset_right_overlay_middle(self):
+        self.right_overlay_middle_path = None
+        self.refresh_views()
+
+    def choose_right_overlay_top(self):
+        chosen_path = self._choose_overlay_common("右オーバーレイ上を選択")
+        if chosen_path is None:
+            return
+        self.right_overlay_top_path = chosen_path
+        self.refresh_views()
+
+    def reset_right_overlay_top(self):
+        self.right_overlay_top_path = None
         self.refresh_views()
 
     def keyPressEvent(self, event):
