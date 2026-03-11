@@ -411,6 +411,9 @@ class MainWindow(QMainWindow):
         self.left_view = AspectImageLabel("左の補助表示", target_ratio=9 / 16)
         self.right_view = AspectImageLabel("右のメイン表示", target_ratio=16 / 9)
 
+        self.left_view.context_menu_requested.connect(
+            self.show_left_view_context_menu
+        )
         self.right_view.wheel_up.connect(self.prev_page)
         self.right_view.wheel_down.connect(self.next_page)
         self.right_view.context_menu_requested.connect(
@@ -536,8 +539,26 @@ class MainWindow(QMainWindow):
         self.refresh_views()
         self.right_view.setFocus()
 
+    def show_left_view_context_menu(self, global_pos):
+        menu = QMenu(self)
+
+        act_choose_left = QAction("左画像を選ぶ", self)
+        act_reset_left = QAction("左画像を自動に戻す", self)
+
+        act_choose_left.triggered.connect(self.choose_left_image)
+        act_reset_left.triggered.connect(self.reset_left_image)
+
+        menu.addAction(act_choose_left)
+        menu.addAction(act_reset_left)
+
+        menu.exec(global_pos)
+
     def show_right_view_context_menu(self, global_pos):
         menu = QMenu(self)
+
+        act_open_folder = QAction("フォルダを開く", self)
+        act_choose_overlay = QAction("右オーバーレイを選ぶ", self)
+        act_reset_overlay = QAction("右オーバーレイ解除", self)
 
         act_default = QAction("通常モード", self)
         act_vertical = QAction("縦スライドモード", self)
@@ -548,6 +569,10 @@ class MainWindow(QMainWindow):
 
         act_prev = QAction("前へ", self)
         act_next = QAction("次へ", self)
+
+        act_open_folder.triggered.connect(self.open_folder)
+        act_choose_overlay.triggered.connect(self.choose_right_overlay)
+        act_reset_overlay.triggered.connect(self.reset_right_overlay)
 
         act_default.triggered.connect(
             lambda: self.apply_view_mode(self.VIEW_MODE_DEFAULT)
@@ -571,6 +596,11 @@ class MainWindow(QMainWindow):
         act_prev.triggered.connect(self.prev_page)
         act_next.triggered.connect(self.next_page)
 
+        menu.addAction(act_open_folder)
+        menu.addSeparator()
+        menu.addAction(act_choose_overlay)
+        menu.addAction(act_reset_overlay)
+        menu.addSeparator()
         menu.addAction(act_default)
         menu.addAction(act_vertical)
         menu.addAction(act_focus)
